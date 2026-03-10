@@ -44,3 +44,18 @@ Function URL: https://xfi4b8lil0.execute-api.mx-central-1.amazonaws.com/tacos/
 ```bash
 aws cloudformation delete-stack --stack-name el-somer-brero --region mx-central-1
 ```
+
+## Costs
+
+Lambda pricing is consistent globally at $0.20 per 1M requests after the free tier.
+
+| Component | Rate | This Lambda (128MB, ~1s) |
+|---|---|---|
+| Requests | $0.20 / 1M | $0.0000002 per call |
+| Compute | $0.0000166667 / GB-s | ~$0.0000021 per call |
+| API Gateway | $1.00 / 1M | $0.000001 per call |
+| **Total per call** | | **~$0.0000033** |
+| **1M calls/month** | | **~$3.50** |
+
+The free tier includes 1M Lambda requests and 400,000 GB-seconds of compute per month — enough 
+to cover ~3.1M invocations at this configuration.
