@@ -1,0 +1,41 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: PoC - Lambda IP geolocation check
+
+Globals:
+  Function:
+    Timeout: 15
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+
+Resources:
+  TacosApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: tacos
+
+  IpLookupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.lambda_handler
+      MemorySize: 128
+      Events:
+        GetIp:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TacosApi
+            Path: /
+            Method: get
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${TacosApi}.execute-api.${AWS::Region}.amazonaws.com/tacos/"
+  FunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt IpLookupFunction.Arn
+  Region:
+    Description: Deployed region
+    Value: !Ref AWS::Region
