@@ -6,6 +6,7 @@ Proof of concept: deploy an AWS Lambda to the Mexico (`mx-central-1`) region and
 
 - AWS CLI configured with valid credentials
 - AWS SAM CLI installed
+- Python 3.12
 - **Mexico (Central) region enabled** — go to **AWS Console → Account → Regions** and opt in to `mx-central-1` if not already enabled
 
 ## Deploy
@@ -18,32 +19,58 @@ Proof of concept: deploy an AWS Lambda to the Mexico (`mx-central-1`) region and
 
 ```
 === Deploying el-somer-brero to mx-central-1 ===
-Building codeuri: /Users/alex/src/el-somer-brero/src runtime: python3.12 architecture: x86_64 functions:
-IpLookupFunction
-
-Build Succeeded
-
+...
 Successfully created/updated stack - el-somer-brero in mx-central-1
 
 === Deployed! ===
-Function URL: https://xfi4b8lil0.execute-api.mx-central-1.amazonaws.com/tacos/
+API URL: https://xfi4b8lil0.execute-api.mx-central-1.amazonaws.com/tacos/
 
 === Invoking to check IP and country ===
 {
-  "public_ip": "78.13.106.33",
-  "country": "Mexico",
-  "country_code": "MX",
-  "region": "Querétaro",
-  "city": "Querétaro City",
-  "org": "Amazon.com, Inc."
+  "lambda_public_ip": "78.13.106.33",
+  "lambda_country": "Mexico",
+  "lambda_country_code": "MX",
+  "lambda_city": "Querétaro City",
+  "caller_ip": "72.68.68.47",
+  "caller_country": "United States",
+  "caller_country_code": "US",
+  "caller_city": "New York City",
+  "response_time_ms": 834.21
 }
 ```
+
+Geo fields show `"unknown"` if ipapi.co's free tier rate limit (~30 req/min) is hit; the `[GEO_FAILURE]` CloudWatch metric and alarm will fire in that case.
+
+## Local development
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/                         # run tests
+ruff check src/ tests/ && ruff format --check src/ tests/   # lint
+sam validate --lint --region mx-central-1       # validate template
+```
+
+## CI
+
+GitHub Actions runs three parallel jobs on every push and PR to `main`:
+
+| Job | What it does |
+|---|---|
+| `lint` | `ruff check` + `ruff format --check` |
+| `test` | `pytest` with 80% coverage threshold |
+| `sam-validate` | `sam validate --lint` against mx-central-1 |
+
+## Observability
+
+Every invocation writes a record to a DynamoDB access log table (1-year TTL, retained on stack deletion). A CloudWatch dashboard (`el-somer-brero-observability`) tracks Lambda duration, invocations/errors, API Gateway latency, DynamoDB writes, and geo lookup failures. An alarm fires if any geo lookup fails in a 5-minute window.
 
 ## Cleanup
 
 ```bash
 aws cloudformation delete-stack --stack-name el-somer-brero --region mx-central-1
 ```
+
+> The DynamoDB access log table has `DeletionPolicy: Retain` — it will survive the stack deletion and must be removed manually if no longer needed.
 
 ## Costs
 

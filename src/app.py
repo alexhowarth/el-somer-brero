@@ -8,7 +8,9 @@ from decimal import Decimal
 
 import boto3
 
-_dynamodb = boto3.resource("dynamodb")
+# Initialised lazily in _write_access_log so module import never calls boto3
+# without a region (which would crash the test collector in CI).
+_dynamodb = None
 
 
 def lambda_handler(event, context):
@@ -107,9 +109,12 @@ def _geolocate(ip):
 
 
 def _write_access_log(item):
+    global _dynamodb
     table_name = os.environ.get("ACCESS_LOG_TABLE")
     if not table_name:
         return
+    if _dynamodb is None:
+        _dynamodb = boto3.resource("dynamodb")
     try:
         table = _dynamodb.Table(table_name)
         table.put_item(Item=item)
