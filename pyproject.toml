@@ -1,0 +1,22 @@
+# ── Pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+# Add src/ to sys.path so tests can do `from app import ...` without needing to
+# install the project as a package.
+pythonpath = ["src"]
+
+# ── Coverage ──────────────────────────────────────────────────────────────────
+[tool.coverage.run]
+# Only measure coverage inside src/; ignore the test files themselves.
+source = ["src"]
+
+# ── Ruff (linter + formatter) ─────────────────────────────────────────────────
+[tool.ruff]
+line-length = 88
+# Must match the Lambda runtime declared in template.yaml.
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/W = pycodestyle errors and warnings
+# F   = pyflakes (undefined names, unused imports, etc.)
+# I   = isort (import ordering)
+select = ["E", "F", "W", "I"]

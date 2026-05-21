@@ -1,41 +1,300 @@
+# AWS SAM template file (YAML).
+# SAM expands this into standard CloudFormation when you deploy.
 AWSTemplateFormatVersion: '2010-09-09'
+# Transform tells CloudFormation to process this file through the SAM
+# transformer before deploying. Without this line, SAM-specific resource
+# types (AWS::Serverless::*) and shorthand properties would be rejected.
 Transform: AWS::Serverless-2016-10-31
 Description: PoC - Lambda IP geolocation check
 
+# Globals apply to every AWS::Serverless::Function in this template,
+# so you do not need to repeat these values on each function.
 Globals:
   Function:
+    # Max time (in seconds) Lambda can run per request.
     Timeout: 15
+    # Lambda runtime for this project.
     Runtime: python3.12
+    # CPU architecture used by the function.
     Architectures:
       - x86_64
 
 Resources:
+  # API Gateway REST API. This is the public HTTP endpoint callers hit.
   TacosApi:
     Type: AWS::Serverless::Api
     Properties:
+      # Explicit name so it can be referenced by name in the CloudWatch dashboard.
+      Name: !Sub "${AWS::StackName}-api"
+      # "Stage" is a versioned path segment in the URL.
+      # With tacos, your URL looks like ...amazonaws.com/tacos/
       StageName: tacos
+      # Turn on per-method CloudWatch metrics so API Gateway publishes
+      # latency, request count, and error metrics.
+      MethodSettings:
+        - HttpMethod: "*"
+          ResourcePath: "/*"
+          MetricsEnabled: true
 
+  # DynamoDB table that stores one item per Lambda invocation.
+  # Partition key: request_id (unique Lambda request id)
+  # Sort key: invoked_at (UTC timestamp)
+  AccessLogTable:
+    Type: AWS::DynamoDB::Table
+    # Retain the table on stack deletion so log data is not lost.
+    # UpdateReplacePolicy: Retain ensures the table is also kept if CloudFormation
+    # needs to replace the resource (e.g. after a key schema change).
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # PAY_PER_REQUEST = on-demand billing; no capacity planning needed.
+      # The alternative is PROVISIONED, where you set read/write capacity units upfront.
+      BillingMode: PAY_PER_REQUEST
+      # Automatically expire items after 1 year. The Lambda writes
+      # expires_at as a Unix epoch timestamp (int(time.time()) + 31536000).
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+        - AttributeName: invoked_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+        - AttributeName: invoked_at
+          KeyType: RANGE
+
+  # Lambda function that handles requests from the API above.
   IpLookupFunction:
     Type: AWS::Serverless::Function
     Properties:
+      # Folder containing your Lambda source code.
       CodeUri: src/
+      # Entry point = file.function_name -> src/app.py:lambda_handler
       Handler: app.lambda_handler
+      # Memory in MB. More memory also increases CPU allocation.
       MemorySize: 128
+      Environment:
+        Variables:
+          # Lambda reads this to know which DynamoDB table to write to.
+          ACCESS_LOG_TABLE: !Ref AccessLogTable
+      Policies:
+        # DynamoDBCrudPolicy is a SAM policy template — SAM expands it into
+        # the full IAM policy document at deploy time. It is NOT a standard
+        # CloudFormation or IAM type; it only works inside SAM templates.
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AccessLogTable
       Events:
+        # This event wires API Gateway -> Lambda.
         GetIp:
           Type: Api
           Properties:
+            # Use the API resource defined above (TacosApi).
             RestApiId: !Ref TacosApi
+            # Route path under the stage. '/' means the root path.
             Path: /
+            # HTTP method clients must use for this route.
             Method: get
 
+  # Alarm if the Lambda average duration stays high.
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Average Lambda duration above 4 seconds for 3 minutes.
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IpLookupFunction
+      Statistic: Average
+      Period: 60
+      # EvaluationPeriods: how many consecutive periods must breach the
+      # threshold before the alarm fires. 3 here means 3 minutes in a row.
+      EvaluationPeriods: 3
+      Threshold: 4000
+      ComparisonOperator: GreaterThanThreshold
+      # notBreaching: if a period has no data (e.g. no invocations),
+      # treat it as within threshold rather than triggering the alarm.
+      TreatMissingData: notBreaching
+
+  # Alarm if the Lambda starts returning errors.
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda returned one or more errors in the last minute.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IpLookupFunction
+      Statistic: Sum
+      Period: 60
+      # A single error in any one-minute window is enough to fire.
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # notBreaching: periods with no invocations (no data) do not trigger the alarm.
+      TreatMissingData: notBreaching
+
+  # Metric filter that counts [GEO_FAILURE] log lines emitted by the Lambda
+  # into a custom CloudWatch metric, making geo API errors chartable and
+  # alarmable without any extra dependencies.
+  GeoLookupFailureFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${IpLookupFunction}"
+      # Matches any log line containing GEO_FAILURE (printed by app.py).
+      FilterPattern: "GEO_FAILURE"
+      MetricTransformations:
+        - MetricNamespace: ElSomerBrero
+          MetricName: GeoLookupFailures
+          MetricValue: "1"
+          # Emit 0 in periods with no failures so the graph stays continuous.
+          DefaultValue: 0
+
+  # Alarm if geo lookups start failing — indicates ipapi.co is rate-limiting
+  # or unreachable, meaning country data in the access log will be incomplete.
+  GeoLookupFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Geo API (ipapi.co) returned errors in the last 5 minutes.
+      Namespace: ElSomerBrero
+      MetricName: GeoLookupFailures
+      Statistic: Sum
+      Period: 300
+      # A single failure in any 5-minute window is enough to fire.
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # notBreaching: the metric filter emits DefaultValue=0 in quiet periods,
+      # so there is always data and this setting mainly guards against gaps
+      # during initial deploy before the log group exists.
+      TreatMissingData: notBreaching
+
+  # Dashboard for the main operational signals for this PoC.
+  ObservabilityDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-observability"
+      # DashboardBody is a JSON string. !Sub interpolates CloudFormation
+      # variables like ${IpLookupFunction} and ${AWS::Region} into it.
+      # The widget grid is 24 columns wide. x/y are the top-left corner,
+      # width/height are in grid units. Widgets on the same row share a y value.
+      # "." inside a metric array means "inherit from the column above";
+      # it lets you plot multiple metrics without repeating namespace/dimensions.
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Lambda Duration",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stat": "Average",
+                "period": 60,
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${IpLookupFunction}" ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Lambda Invocations And Errors",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stat": "Sum",
+                "period": 60,
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${IpLookupFunction}" ],
+                  [ ".", "Errors", ".", "." ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "API Gateway Latency",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stat": "Average",
+                "period": 60,
+                "metrics": [
+                  [ "AWS/ApiGateway", "Latency", "ApiName", "${AWS::StackName}-api", "Stage", "tacos", "Method", "GET", "Resource", "/" ],
+                  [ ".", "IntegrationLatency", ".", ".", ".", ".", ".", ".", ".", "." ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "DynamoDB Writes",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stat": "Sum",
+                "period": 60,
+                "metrics": [
+                  [ "AWS/DynamoDB", "SuccessfulRequestLatency", "TableName", "${AccessLogTable}", "Operation", "PutItem" ],
+                  [ ".", "ConsumedWriteCapacityUnits", ".", "." ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "title": "Geo Lookup Failures (ipapi.co)",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stat": "Sum",
+                "period": 60,
+                "metrics": [
+                  [ "ElSomerBrero", "GeoLookupFailures" ]
+                ]
+              }
+            }
+          ]
+        }
+
+# Outputs are values shown after deploy and retrievable via CLI.
 Outputs:
   ApiUrl:
     Description: API Gateway endpoint URL
+    # Build the API invoke URL from API id + current AWS region + stage.
     Value: !Sub "https://${TacosApi}.execute-api.${AWS::Region}.amazonaws.com/tacos/"
   FunctionArn:
     Description: Lambda Function ARN
+    # ARN uniquely identifies the Lambda resource in AWS.
     Value: !GetAtt IpLookupFunction.Arn
+  AccessLogTableName:
+    Description: DynamoDB table storing one row per invocation
+    Value: !Ref AccessLogTable
+  DashboardName:
+    Description: CloudWatch dashboard name for Lambda, API, and DynamoDB metrics
+    Value: !Sub "${AWS::StackName}-observability"
   Region:
     Description: Deployed region
+    # Region where this stack is deployed (for example mx-central-1).
     Value: !Ref AWS::Region

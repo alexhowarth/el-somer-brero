@@ -1,0 +1,119 @@
+# CI pipeline for el-somer-brero
+#
+# Three independent jobs run in parallel on every push to main and on every
+# pull request targeting main:
+#
+#   lint         - style and import-order checks via ruff
+#   test         - unit tests with coverage enforcement via pytest
+#   sam-validate - CloudFormation/SAM template schema validation
+#
+# None of these jobs deploy anything or require real AWS credentials.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Lint
+  # Catches style violations, unused imports, and import-ordering issues before
+  # they reach a code review. Ruff replaces the traditional flake8 + isort stack.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the repository so the runner has access to source files.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Set up the same Python version the Lambda runs on (declared in
+      # template.yaml) so lint rules apply to the right language level.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # Install only the linting tool - no test dependencies needed here.
+      - name: Install ruff
+        run: pip install "ruff>=0.4"
+
+      # Check formatting without modifying files.
+      # Fails if any file would be reformatted by `ruff format`.
+      - name: Check code formatting (ruff format)
+        run: ruff format --check src/ tests/
+
+      # Run the linter rules selected in pyproject.toml (E, F, W, I).
+      # Fails on any violation and prints the offending lines.
+      - name: Run linter (ruff check)
+        run: ruff check src/ tests/
+
+  # Unit Tests
+  # Runs all tests under tests/ and measures line coverage of src/.
+  # The job fails if coverage drops below 80% to ensure new code paths are tested.
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # Install all test dependencies declared in requirements-dev.txt.
+      # This includes boto3 (needed so `import boto3` in app.py succeeds),
+      # pytest, pytest-cov, and ruff.
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Run the full test suite.
+      # --cov=src                 measures coverage of everything inside src/
+      # --cov-report=term-missing prints a per-file summary with missed lines
+      # --cov-fail-under=80       fails the job if overall coverage drops below 80%
+      - name: Run tests with coverage
+        run: pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=80
+
+  # SAM Template Validation
+  # Validates template.yaml against the CloudFormation and SAM JSON schemas.
+  # Catches typos in resource types, missing required properties, and invalid
+  # IAM policy references before any deployment attempt.
+  #
+  # No real AWS credentials are needed: --lint runs cfn-lint locally and never
+  # makes API calls. The dummy credentials below satisfy the boto3 credential
+  # resolver so it doesn't bail out before reaching the local validation logic.
+  sam-validate:
+    name: SAM Template Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Install the SAM CLI via the official GitHub Action.
+      # use-installer: true fetches the standalone binary (faster than pip).
+      - name: Set up SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      # Validate the SAM template.
+      # --lint  runs cfn-lint in addition to SAM's own schema checks,
+      #         catching a broader set of CloudFormation anti-patterns.
+      - name: Validate SAM template
+        run: sam validate --lint
+        env:
+          # A region must be set; use the same default as deploy.sh.
+          AWS_DEFAULT_REGION: mx-central-1
+          # Dummy credentials satisfy the boto3 credential resolver.
+          # No real API calls are made during local template validation.
+          AWS_ACCESS_KEY_ID: dummy
+          AWS_SECRET_ACCESS_KEY: dummy

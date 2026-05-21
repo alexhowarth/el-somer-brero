@@ -3,17 +3,19 @@ set -euo pipefail
 
 STACK_NAME="el-somer-brero"
 REGION="${1:-mx-central-1}"
+AWS_PROFILE="${AWS_PROFILE:-default}"
 S3_BUCKET="${S3_BUCKET:-}"
 
 echo "=== Deploying $STACK_NAME to $REGION ==="
 
 # Build
-sam build --region "$REGION"
+sam build --region "$REGION" --profile "$AWS_PROFILE"
 
 # Deploy
 DEPLOY_ARGS=(
   --stack-name "$STACK_NAME"
   --region "$REGION"
+  --profile "$AWS_PROFILE"
   --resolve-s3
   --capabilities CAPABILITY_IAM
   --no-confirm-changeset
@@ -30,6 +32,7 @@ sam deploy "${DEPLOY_ARGS[@]}"
 FUNCTION_URL=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
   --region "$REGION" \
+  --profile "$AWS_PROFILE" \
   --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' \
   --output text)
 
